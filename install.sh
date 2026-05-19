@@ -25,30 +25,37 @@ step()  { STEP=$((STEP+1)); printf "\n${c_b}══ [%d/%d] %s${c_0}\n" "$STEP" "
 
 trap 'die "Failed at line $LINENO (step $STEP/$TOTAL_STEPS). Check the output above."' ERR
 
-# ────────────────────────────────────────────── re-exec with TTY if piped
-# When invoked as `curl ... | sudo bash`, stdin is the pipe — `read` would
-# block forever. Save ourselves to a temp file and re-exec with the TTY
-# attached so the interactive prompts work.
-if [[ ! -t 0 ]]; then
-    if [[ -r /dev/tty ]]; then
-        TMP_SELF="$(mktemp /tmp/subproxy-install.XXXXXX.sh)"
-        cat >"$TMP_SELF"
-        chmod +x "$TMP_SELF"
-        printf "${c_b}[*]${c_0} Re-executing with interactive terminal (%s)…\n" "$TMP_SELF"
-        exec bash "$TMP_SELF" </dev/tty
-    else
-        die "stdin is not a TTY and /dev/tty is unavailable. Try:\n  bash <(curl -fsSL https://raw.githubusercontent.com/StefanoTG/happmeta/main/install.sh)"
-    fi
-fi
-
-# ────────────────────────────────────────────── must be root
-[[ $EUID -eq 0 ]] || die "Please run as root (use sudo)."
-
-REPO_URL_DEFAULT="https://github.com/StefanoTG/happmeta.git"
+# ────────────────────────────────────────────── repo / script locations
+REPO_URL="https://github.com/StefanoTG/happmeta.git"
+SCRIPT_URL="https://raw.githubusercontent.com/StefanoTG/happmeta/main/install.sh"
 INSTALL_DIR="/opt/subproxy"
 SERVICE_API="subproxy-api"
 SERVICE_BOT="subproxy-bot"
 CFG_FILE="$INSTALL_DIR/config/config.json"
+
+# ────────────────────────────────────────────── re-exec with a TTY if piped
+# When invoked as `curl ... | sudo bash`, stdin is the pipe — `read` would
+# block forever, AND we cannot just `cat` ourselves because bash has
+# already consumed part of the pipe. Re-download the full script and
+# re-exec it with /dev/tty as stdin.
+if [[ ! -t 0 ]]; then
+    if [[ ! -r /dev/tty ]]; then
+        die "No interactive terminal available. Try: bash <(curl -fsSL $SCRIPT_URL)"
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        printf "${c_b}[*]${c_0} Installing curl first…\n"
+        apt-get update -y >/dev/null && apt-get install -y curl
+    fi
+    TMP_SELF="$(mktemp /tmp/subproxy-install.XXXXXX.sh)"
+    printf "${c_b}[*]${c_0} Downloading installer to %s …\n" "$TMP_SELF"
+    curl -fsSL "$SCRIPT_URL" -o "$TMP_SELF" || die "Download failed: $SCRIPT_URL"
+    chmod +x "$TMP_SELF"
+    printf "${c_b}[*]${c_0} Re-executing with interactive terminal…\n\n"
+    exec bash "$TMP_SELF" </dev/tty
+fi
+
+# ────────────────────────────────────────────── must be root
+[[ $EUID -eq 0 ]] || die "Please run as root (use sudo)."
 
 # ────────────────────────────────────────────── helpers
 ask() {
@@ -85,7 +92,7 @@ echo
 log "Gathering configuration (you can press Enter to accept defaults in [brackets])."
 echo
 
-REPO_URL=$(ask "Git repository URL" "$REPO_URL_DEFAULT")
+log "Repository: $REPO_URL"
 TG_TOKEN=$(ask "Telegram bot token")
 TG_ADMIN=$(ask "Telegram admin numeric ID")
 PANEL_HOST=$(ask "Real Pasarguard panel domain or IP")
