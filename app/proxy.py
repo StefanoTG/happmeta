@@ -33,6 +33,11 @@ _STRIP_REQUEST_HEADERS = {
     "x-forwarded-host",
     "x-forwarded-proto",
     "x-real-ip",
+    # We strip accept-encoding so the upstream always returns identity
+    # (uncompressed). Otherwise the upstream may answer with brotli/zstd,
+    # which httpx does not decode by default, and we would forward raw
+    # compressed bytes after dropping the content-encoding header.
+    "accept-encoding",
 }
 
 
