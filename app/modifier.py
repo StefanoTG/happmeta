@@ -70,16 +70,32 @@ def build_response_headers(upstream_headers: Dict[str, str], db: Database) -> Di
         kl = k.lower()
         if kl in HOP_BY_HOP:
             continue
-        lowered[kl] = v
+        lowered[kl] = _safe_header_value(v)
 
     for row in db.list_metadata(include_disabled=True):
         name = row["name"].lower()
         if row["enabled"]:
-            lowered[name] = row["value"]
+            lowered[name] = _safe_header_value(row["value"])
         else:
             lowered.pop(name, None)
 
     return lowered
+
+
+def _safe_header_value(value: str) -> str:
+    """
+    HTTP headers can only carry latin-1 bytes. To preserve emoji and any
+    other UTF-8 characters we pass the UTF-8 bytes through as latin-1.
+    Subscription clients (Happ, Streisand, etc.) decode the bytes as
+    UTF-8 and display the original glyphs correctly.
+    """
+    if value is None:
+        return ""
+    try:
+        value.encode("latin-1")
+        return value  # already safe
+    except UnicodeEncodeError:
+        return value.encode("utf-8").decode("latin-1")
 
 
 # ---------------------------------------------------------------------------
