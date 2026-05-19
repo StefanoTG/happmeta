@@ -1,0 +1,16 @@
+[Unit]
+Description=SubProxy FastAPI middleware
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/subproxy
+Environment=SUBPROXY_CONFIG=/opt/subproxy/config/config.json
+ExecStart=/opt/subproxy/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port __PORT__ --proxy-headers --forwarded-allow-ips=*
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=SubProxy Telegram bot
+After=network.target subproxy-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/subproxy
+Environment=SUBPROXY_CONFIG=/opt/subproxy/config/config.json
+ExecStart=/opt/subproxy/venv/bin/python -m bot.bot
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
