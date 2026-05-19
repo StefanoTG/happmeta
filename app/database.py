@@ -55,6 +55,14 @@ class Database:
         with self._conn() as c:
             c.executescript(SCHEMA)
 
+    # ---------------- cache invalidation ----------------
+    def data_version(self) -> int:
+        """Return SQLite's data_version pragma — changes on any write
+        from any process. Used as a cheap cache-invalidation key."""
+        with self._conn() as c:
+            r = c.execute("PRAGMA data_version").fetchone()
+            return int(r[0]) if r else 0
+
     # ---------------- metadata ----------------
     def list_metadata(self, include_disabled: bool = True) -> List[Dict[str, Any]]:
         q = "SELECT * FROM metadata"

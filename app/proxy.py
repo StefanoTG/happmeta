@@ -1,25 +1,28 @@
 """
 HTTP proxy logic. Forwards subscription requests to the real Pasarguard
 panel, then rewrites headers + body before returning to the client.
+
+A single httpx.AsyncClient is reused across all requests so TCP+TLS
+connections stay warm, which makes subsequent subscription updates
+practically instant.
 """
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import Optional
 
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import Response
 
+from .cache import get_cache
 from .config import get_config
-from .database import get_db
 from .modifier import build_response_headers, modify_body
 
 log = logging.getLogger("subproxy")
 
 
-# Headers we don't want to leak from the client to the upstream panel
-# (Host is rewritten explicitly).
+# Headers we don't want to leak from the client to the upstream panel.
 _STRIP_REQUEST_HEADERS = {
     "host",
     "content-length",
@@ -33,14 +36,51 @@ _STRIP_REQUEST_HEADERS = {
     "x-forwarded-host",
     "x-forwarded-proto",
     "x-real-ip",
-    # We strip accept-encoding so the upstream always returns identity
-    # (uncompressed). Otherwise the upstream may answer with brotli/zstd,
-    # which httpx does not decode by default, and we would forward raw
-    # compressed bytes after dropping the content-encoding header.
+    # Force identity encoding from upstream (httpx doesn't decode br/zstd).
     "accept-encoding",
 }
 
 
+# ----------------------------------------------------------------------
+# Shared client (created once at startup)
+# ----------------------------------------------------------------------
+_client: Optional[httpx.AsyncClient] = None
+
+
+async def startup_client() -> None:
+    global _client
+    if _client is not None:
+        return
+    cfg = get_config()
+    timeout = httpx.Timeout(
+        float(cfg.panel.get("timeout_seconds", 20)),
+        connect=5.0,
+    )
+    limits = httpx.Limits(
+        max_connections=100,
+        max_keepalive_connections=50,
+        keepalive_expiry=60.0,
+    )
+    _client = httpx.AsyncClient(
+        verify=bool(cfg.panel.get("verify_ssl", True)),
+        timeout=timeout,
+        limits=limits,
+        follow_redirects=True,
+        http2=False,  # Pasarguard / nginx upstreams aren't always h2
+    )
+    log.info("HTTP client pool initialised (keepalive=50)")
+
+
+async def shutdown_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
 def _prepare_request_headers(req: Request) -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in req.headers.items():
@@ -50,13 +90,12 @@ def _prepare_request_headers(req: Request) -> dict[str, str]:
     return out
 
 
+# ----------------------------------------------------------------------
+# Main forward
+# ----------------------------------------------------------------------
 async def forward_subscription(request: Request, path: str) -> Response:
-    """
-    Forward a subscription request to the upstream panel, then rewrite
-    metadata headers and body (node names).
-    """
     cfg = get_config()
-    db = get_db()
+    cache = get_cache()
 
     if ".." in path or path.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -66,19 +105,23 @@ async def forward_subscription(request: Request, path: str) -> Response:
         upstream_url = f"{upstream_url}?{request.url.query}"
 
     headers = _prepare_request_headers(request)
-    verify = bool(cfg.panel.get("verify_ssl", True))
-    timeout = float(cfg.panel.get("timeout_seconds", 20))
 
-    log.info("→ Forwarding %s %s", request.method, upstream_url)
+    # Skip body read for safe methods — saves a roundtrip and avoids
+    # buffering useless data.
+    body = b""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        body = await request.body()
+
+    if _client is None:  # safety net (shouldn't happen)
+        await startup_client()
+    assert _client is not None
+
+    log.info("→ %s %s", request.method, upstream_url)
 
     try:
-        async with httpx.AsyncClient(
-            verify=verify, timeout=timeout, follow_redirects=True
-        ) as client:
-            r = await client.request(
-                request.method, upstream_url, headers=headers,
-                content=await request.body(),
-            )
+        r = await _client.request(
+            request.method, upstream_url, headers=headers, content=body,
+        )
     except httpx.TimeoutException:
         log.warning("Upstream timeout: %s", upstream_url)
         raise HTTPException(status_code=504, detail="Upstream timeout")
@@ -86,23 +129,21 @@ async def forward_subscription(request: Request, path: str) -> Response:
         log.error("Upstream error: %s", e)
         raise HTTPException(status_code=502, detail="Upstream error")
 
-    body = r.content
+    out_body = r.content
     content_type = r.headers.get("content-type", "")
 
-    # Mutate body (node renames) — only if it's a subscription-ish response
-    if r.status_code == 200 and body:
+    if r.status_code == 200 and out_body:
         try:
-            body = modify_body(body, content_type, db)
-        except Exception as exc:  # never break the proxy because of modifier bugs
+            out_body = modify_body(out_body, content_type, cache)
+        except Exception as exc:
             log.exception("Body modification failed: %s", exc)
 
-    # Merge / override headers
-    final_headers = build_response_headers(dict(r.headers), db)
+    final_headers = build_response_headers(dict(r.headers), cache)
 
-    log.info("← %s %s (%d bytes)", r.status_code, upstream_url, len(body))
+    log.info("← %s %s (%d bytes)", r.status_code, upstream_url, len(out_body))
 
     return Response(
-        content=body,
+        content=out_body,
         status_code=r.status_code,
         headers=final_headers,
         media_type=final_headers.get("content-type"),

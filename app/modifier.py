@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote, urlparse, urlunparse
 
 import yaml
 
+from .cache import DataCache
 from .database import Database
 
 
@@ -55,7 +56,7 @@ HOP_BY_HOP = {
 # ---------------------------------------------------------------------------
 # Headers
 # ---------------------------------------------------------------------------
-def build_response_headers(upstream_headers: Dict[str, str], db: Database) -> Dict[str, str]:
+def build_response_headers(upstream_headers: Dict[str, str], cache: DataCache) -> Dict[str, str]:
     """
     Merge upstream headers with operator-defined metadata.
 
@@ -72,7 +73,7 @@ def build_response_headers(upstream_headers: Dict[str, str], db: Database) -> Di
             continue
         lowered[kl] = _safe_header_value(v)
 
-    for row in db.list_metadata(include_disabled=True):
+    for row in cache.metadata():
         name = row["name"].lower()
         if row["enabled"]:
             lowered[name] = _safe_header_value(row["value"])
@@ -239,9 +240,9 @@ def _detect_format(body: str, content_type: str) -> str:
 # ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
-def modify_body(body: bytes, content_type: str, db: Database) -> bytes:
+def modify_body(body: bytes, content_type: str, cache: DataCache) -> bytes:
     """Apply node-rename rules to a subscription body. Preserves encoding."""
-    rules = db.list_node_rules(only_enabled=True)
+    rules = cache.enabled_node_rules()
     if not rules:
         return body
 
